@@ -164,6 +164,10 @@ Error load_libpq_functions() {
 	LOAD_PQ_FUNCTION(freeCancel);
 	LOAD_PQ_FUNCTION(cancel);
 	LOAD_PQ_FUNCTION(setNoticeProcessor);
+	LOAD_PQ_FUNCTION(fformat);
+	LOAD_PQ_FUNCTION(unescapeBytea);
+	LOAD_PQ_FUNCTION(freemem);
+	LOAD_PQ_FUNCTION(escapeByteaConn);
 #ifdef LIBPQ_HAS_CLOSE_PREPARED
 	LOAD_PQ_FUNCTION(closePrepared);
 #else // LIBPQ_HAS_CLOSE_PREPARED

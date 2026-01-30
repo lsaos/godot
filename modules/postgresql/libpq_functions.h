@@ -96,6 +96,10 @@ struct LibPQFunctions {
 	void (*freeCancel)(PGcancel *cancel);
 	int (*cancel)(PGcancel *cancel, char *errbuf, int errbufsize);
 	PQnoticeProcessor (*setNoticeProcessor)(PGconn *conn, PQnoticeProcessor proc, void *arg);
+	int (*fformat)(const PGresult *res, int field_num);
+	unsigned char *(*unescapeBytea)(const unsigned char *strtext, size_t *retbuflen);
+	void (*freemem)(void *ptr);
+	unsigned char *(*escapeByteaConn)(PGconn *conn, const unsigned char *from, size_t from_length, size_t *to_length);
 };
 
 extern LibPQFunctions *pq;

@@ -28,11 +28,18 @@
 /* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
 /**************************************************************************/
 
+/**************************************************************************/
+/*  Portions of this file are derived from PDO (PHP Data Objects)         */
+/*  https://www.php.net/manual/en/book.pdo.php                            */
+/*                                                                        */
+/*  The following code is copyright (c) The PHP Group                     */
+/*  and is licensed under the PHP License, version 3.01:                  */
+/*  https://www.php.net/license/3_01.txt                                  */
+/**************************************************************************/
+
 #include "sql_connection.h"
 
 const char *const SQL_CODE_UNSUPPORTED = "IM001";
-
-constexpr int FETCH_FLAGS = 0xfffffff0;
 
 //
 // SQLError implementation
@@ -85,6 +92,10 @@ String SQLError::get_error_code() const {
 //
 
 Vector<Ref<SQLDriver>> SQLDriver::drivers;
+
+SQLDriver::SQLDriver(int p_features) :
+		features(p_features) {
+}
 
 void SQLDriver::add_driver(Ref<SQLDriver> p_driver) {
 	ERR_FAIL_COND(p_driver.is_null());
@@ -157,8 +168,8 @@ Variant SQLStatement::get_fetch_param() const {
 }
 
 static bool _validate_fetch_mode(int p_fetch_mode, const Variant &p_param, bool p_allow_default) {
-	const int mode = p_fetch_mode & ~FETCH_FLAGS;
-	int flags = p_fetch_mode & FETCH_FLAGS;
+	const int mode = p_fetch_mode & ~SQLStatement::FETCH_FLAGS;
+	int flags = p_fetch_mode & SQLStatement::FETCH_FLAGS;
 
 	switch (mode) {
 		case SQLStatement::FETCH_DEFAULT:
@@ -220,7 +231,7 @@ bool SQLStatement::_get_fetch_mode(int &r_mode, Variant &r_param, bool p_fetch_a
 	// Do checks that we could not do in _validate_fetch_mode
 	if ((r_mode & (FETCH_GROUP | FETCH_UNIQUE)) != 0) {
 		ERR_FAIL_COND_V(!p_fetch_all, false);
-		ERR_FAIL_COND_V(impl->get_column_count() < 2, false);
+		ERR_FAIL_COND_V(columns.size() < 2, false);
 		if ((r_mode & ~FETCH_FLAGS) == FETCH_DEFAULT) {
 			r_mode |= FETCH_BOTH;
 		}
@@ -233,11 +244,11 @@ bool SQLStatement::_get_fetch_mode(int &r_mode, Variant &r_param, bool p_fetch_a
 			break;
 		case FETCH_KEY_PAIR:
 			ERR_FAIL_COND_V(!p_fetch_all, false);
-			ERR_FAIL_COND_V(impl->get_column_count() != 2, false);
+			ERR_FAIL_COND_V(columns.size() != 2, false);
 			break;
 		case FETCH_COLUMN: {
 			const int index = r_param;
-			ERR_FAIL_INDEX_V(index, impl->get_column_count(), false);
+			ERR_FAIL_INDEX_V(index, (int)columns.size(), false);
 			break;
 		}
 		default:
@@ -255,7 +266,7 @@ Variant SQLStatement::_fetch_row(int p_mode, const Variant &p_param, int p_start
 			for (int i = p_start_column; i < p_end_column; ++i) {
 				const Variant value = _fetch_value(i);
 				dictionary[i - p_start_column] = value;
-				dictionary[get_column_name(i)] = value;
+				dictionary[columns[i].name] = value;
 			}
 			return dictionary;
 		}
@@ -263,7 +274,7 @@ Variant SQLStatement::_fetch_row(int p_mode, const Variant &p_param, int p_start
 			Dictionary dictionary;
 			dictionary.reserve(p_end_column - p_start_column);
 			for (int i = p_start_column; i < p_end_column; ++i) {
-				dictionary[get_column_name(i)] = _fetch_value(i);
+				dictionary[columns[i].name] = _fetch_value(i);
 			}
 			return dictionary;
 		}
@@ -271,10 +282,9 @@ Variant SQLStatement::_fetch_row(int p_mode, const Variant &p_param, int p_start
 			Dictionary dictionary;
 			dictionary.reserve(p_end_column - p_start_column);
 			for (int i = p_start_column; i < p_end_column; ++i) {
-				const String column_name = get_column_name(i);
 				const Variant value = _fetch_value(i);
 
-				Variant *const entry = dictionary.getptr(column_name);
+				Variant *const entry = dictionary.getptr(columns[i].name);
 				if (entry) {
 					if (entry->get_type() == Variant::ARRAY) {
 						VariantInternal::get_array(entry)->push_back(value);
@@ -283,7 +293,7 @@ Variant SQLStatement::_fetch_row(int p_mode, const Variant &p_param, int p_start
 						*entry = array;
 					}
 				} else {
-					dictionary[column_name] = value;
+					dictionary[columns[i].name] = value;
 				}
 			}
 			return dictionary;
@@ -310,12 +320,15 @@ Variant SQLStatement::_fetch_row(int p_mode, const Variant &p_param, int p_start
 		case FETCH_INTO: {
 			Object *const object = p_param;
 			for (int i = p_start_column; i < p_end_column; ++i) {
-				const StringName property_name = get_column_name(i);
+				Column &column = columns[i];
+				if (column.string_name == StringName() && !column.name.is_empty()) {
+					column.string_name = column.name;
+				}
 
 				bool valid;
-				object->set(property_name, _fetch_value(i), &valid);
+				object->set(column.string_name, _fetch_value(i), &valid);
 				if (!valid) {
-					_push_error(SQL_ERROR(String(), String(), vformat("Cannot set property '%s' on object.", property_name)));
+					_push_error(SQL_ERROR(String(), String(), vformat("Cannot set property '%s' on object.", column.name)));
 					return Variant();
 				}
 			}
@@ -346,13 +359,16 @@ Object *SQLStatement::_fetch_object(const StringName &p_class_name, int p_start_
 	}
 
 	for (int i = p_start_column; i < p_end_column; ++i) {
-		const StringName property_name = get_column_name(i);
+		Column &column = columns[i];
+		if (column.string_name == StringName() && !column.name.is_empty()) {
+			column.string_name = column.name;
+		}
 
 		bool valid;
-		object->set(property_name, _fetch_value(i), &valid);
+		object->set(column.string_name, _fetch_value(i), &valid);
 		if (!valid) {
 			memdelete(object);
-			_push_error(SQL_ERROR(String(), String(), vformat("Cannot set property '%s' on class instance.", property_name)));
+			_push_error(SQL_ERROR(String(), String(), vformat("Cannot set property '%s' on class instance.", column.name)));
 			return nullptr;
 		}
 	}
@@ -361,8 +377,15 @@ Object *SQLStatement::_fetch_object(const StringName &p_class_name, int p_start_
 
 Variant SQLStatement::_fetch_value(int p_column) {
 	Variant value;
-	if (!impl->get_column_value(p_column, value)) {
+	if (!impl->get_value(p_column, value)) {
 		return Variant();
+	}
+
+	if (connection->fetch_nulls_mode == NULL_EMPTY_STRING && value.is_string() && value.is_zero()) {
+		value = Variant();
+	}
+	if (connection->fetch_nulls_mode == NULL_TO_STRING && value.get_type() == Variant::NIL) {
+		value = String();
 	}
 	return value;
 }
@@ -400,18 +423,16 @@ Variant SQLStatement::fetch_all(int p_mode, const Variant &p_param) {
 		}
 		return dictionary;
 	} else if ((mode & FETCH_UNIQUE) != 0) {
-		const int column_count = impl->get_column_count();
 		Dictionary dictionary;
 		while (true) {
 			if (!_fetch_next_row(FETCH_ORI_NEXT, 0)) {
 				break;
 			}
 
-			dictionary[_fetch_value(0)] = _fetch_row(mode, param, 1, column_count);
+			dictionary[_fetch_value(0)] = _fetch_row(mode, param, 1, (int)columns.size());
 		}
 		return dictionary;
 	} else if ((mode & FETCH_GROUP) != 0) {
-		const int column_count = impl->get_column_count();
 		Dictionary dictionary;
 		while (true) {
 			if (!_fetch_next_row(FETCH_ORI_NEXT, 0)) {
@@ -419,7 +440,7 @@ Variant SQLStatement::fetch_all(int p_mode, const Variant &p_param) {
 			}
 
 			const Variant key = _fetch_value(0);
-			const Variant row = _fetch_row(mode, param, 1, column_count);
+			const Variant row = _fetch_row(mode, param, 1, (int)columns.size());
 
 			Variant *const entry = dictionary.getptr(key);
 			if (entry) {
@@ -430,8 +451,7 @@ Variant SQLStatement::fetch_all(int p_mode, const Variant &p_param) {
 		}
 		return dictionary;
 	} else {
-		const int column_count = impl->get_column_count();
-		if (column_count < 1) {
+		if (columns.is_empty()) {
 			return Variant();
 		}
 
@@ -441,7 +461,7 @@ Variant SQLStatement::fetch_all(int p_mode, const Variant &p_param) {
 				break;
 			}
 
-			rows.push_back(_fetch_row(mode, param, 0, column_count));
+			rows.push_back(_fetch_row(mode, param, 0, (int)columns.size()));
 		}
 		return rows;
 	}
@@ -461,12 +481,11 @@ Variant SQLStatement::fetch(int p_mode, FetchOrientation p_orientation, int64_t 
 		return Variant();
 	}
 
-	const int column_count = impl->get_column_count();
-	if (column_count < 1) {
+	if (columns.is_empty()) {
 		return Variant();
 	}
 
-	return _fetch_row(mode, param, 0, column_count);
+	return _fetch_row(mode, param, 0, (int)columns.size());
 }
 
 Variant SQLStatement::fetch_column(int p_column) {
@@ -477,7 +496,7 @@ Variant SQLStatement::fetch_column(int p_column) {
 		return Variant();
 	}
 
-	ERR_FAIL_INDEX_V(p_column, impl->get_column_count(), Variant());
+	ERR_FAIL_INDEX_V(p_column, (int)columns.size(), Variant());
 	return _fetch_value(p_column);
 }
 
@@ -489,7 +508,7 @@ Object *SQLStatement::fetch_object(const StringName &p_class_name) {
 		return nullptr;
 	}
 
-	return _fetch_object(p_class_name, 0, impl->get_column_count());
+	return _fetch_object(p_class_name, 0, (int)columns.size());
 }
 
 bool SQLStatement::set_fetch_mode(int p_mode, const Variant &p_param) {
@@ -506,7 +525,7 @@ bool SQLStatement::close_cursor() {
 	ERR_FAIL_NULL_V(impl, false);
 	error.clear();
 
-	if (impl->supports_close_cursor()) {
+	if (connection->driver->has_features(SQLDriver::FEAT_CLOSE_CURSOR)) {
 		if (!impl->close_cursor()) {
 			return false;
 		}
@@ -515,7 +534,7 @@ bool SQLStatement::close_cursor() {
 		do {
 			while (impl->fetch(FETCH_ORI_NEXT, 0)) {
 			}
-			if (!impl->supports_next_rowset() || !impl->do_next_rowset()) {
+			if (!connection->driver->has_features(SQLDriver::FEAT_NEXT_ROWSET) || !impl->do_next_rowset()) {
 				break;
 			}
 		} while (true);
@@ -529,7 +548,7 @@ bool SQLStatement::next_rowset() {
 	ERR_FAIL_NULL_V(impl, false);
 	error.clear();
 
-	if (!impl->supports_next_rowset()) {
+	if (!connection->driver->has_features(SQLDriver::FEAT_NEXT_ROWSET)) {
 		_push_error(SQL_ERROR(SQL_CODE_UNSUPPORTED, String(), String("Driver does not support multiple rowsets.")));
 		return false;
 	}
@@ -604,6 +623,8 @@ bool SQLStatement::_register_parameter(Parameter &r_parameter) {
 }
 
 bool SQLStatement::_parse_parameters() {
+	active_query_string.clear();
+
 	struct Placeholder {
 		Span<char32_t> name;
 		String quoted;
@@ -617,7 +638,7 @@ bool SQLStatement::_parse_parameters() {
 	int placeholder_position = 0;
 	bool escapes = false;
 
-	const SQLDriverStatement::PlaceholderType placeholder_support(impl->get_placeholder_support());
+	const SQLDriverStatement::PlaceholderType placeholder_type(impl->get_placeholder_type());
 
 	const char32_t *c(query_string.ptr());
 	while (*c) {
@@ -646,7 +667,7 @@ bool SQLStatement::_parse_parameters() {
 			if (token_type == SQLDriverStatement::TOKEN_TEXT) {
 				continue;
 			}
-			if (token_type == SQLDriverStatement::TOKEN_ESCAPED_QUESTION && placeholder_support == SQLDriverStatement::PLACEHOLDER_POSITIONAL) {
+			if (token_type == SQLDriverStatement::TOKEN_ESCAPED_QUESTION && placeholder_type == SQLDriverStatement::PLACEHOLDER_POSITIONAL) {
 				// Escaped question marks unsupported, treat as text
 				continue;
 			}
@@ -678,7 +699,7 @@ bool SQLStatement::_parse_parameters() {
 	}
 
 	bool do_checks = true;
-	if (placeholder_support == SQLDriverStatement::PLACEHOLDER_NONE && !parameters.is_empty() && placeholder_position != parameters.size()) {
+	if (placeholder_type == SQLDriverStatement::PLACEHOLDER_NONE && !parameters.is_empty() && placeholder_position != parameters.size()) {
 		// Extra bit of validation for instances when same params are bound more than once
 		if (query_type != SQLDriverStatement::PLACEHOLDER_NONE && placeholder_position > (int)parameters.size()) {
 			bool ok = true;
@@ -704,14 +725,16 @@ bool SQLStatement::_parse_parameters() {
 	if (do_checks) {
 		// Nothing to do
 		if (placeholders.is_empty()) {
+			active_query_string = query_string;
 			return true;
 		}
 
-		if (placeholder_support == query_type && named_rewrite_template.is_empty()) {
+		if (placeholder_type == query_type && named_rewrite_template.is_empty()) {
 			// Query matches native syntax
 			if (escapes) {
 				do_mapping = false;
 			} else {
+				active_query_string = query_string;
 				return true;
 			}
 		} else if (query_type == SQLDriverStatement::PLACEHOLDER_NAMED && !named_rewrite_template.is_empty()) {
@@ -722,46 +745,49 @@ bool SQLStatement::_parse_parameters() {
 	}
 
 	if (do_mapping) {
-		if (placeholder_support == SQLDriverStatement::PLACEHOLDER_NONE) {
-			for (Placeholder &plc : placeholders) {
-				if (plc.position < 0) {
-					continue;
-				}
-				if (query_type == SQLDriverStatement::PLACEHOLDER_NONE) {
-					continue;
-				}
+		if (placeholder_type == SQLDriverStatement::PLACEHOLDER_NONE) {
+			if (!parameters.is_empty()) {
+				for (Placeholder &plc : placeholders) {
+					if (plc.position < 0) {
+						continue;
+					}
+					if (query_type == SQLDriverStatement::PLACEHOLDER_NONE) {
+						continue;
+					}
 
-				Parameter *param;
-				if (query_type == SQLDriverStatement::PLACEHOLDER_POSITIONAL) {
-					param = parameters.getptr(plc.position);
-				} else {
-					param = parameters.getptr(String::utf32_unchecked(plc.name));
-				}
-				if (!param) {
-					_push_error(SQL_ERROR("HY093", String(), "Parameter was not defined."));
-					return false;
-				}
+					Parameter *param;
+					if (query_type == SQLDriverStatement::PLACEHOLDER_POSITIONAL) {
+						param = parameters.getptr(plc.position);
+					} else {
+						param = parameters.getptr(String::utf32_unchecked(plc.name));
+					}
+					if (!param) {
+						_push_error(SQL_ERROR("HY093", String(), "Parameter was not defined."));
+						return false;
+					}
 
-				switch (param->value.get_type()) {
-					case Variant::NIL:
-						plc.quoted = "NULL";
-						break;
-					case Variant::BOOL:
-						plc.quoted = param->value.booleanize() ? "1" : "0";
-						break;
-					case Variant::INT:
-					case Variant::FLOAT:
-						plc.quoted = param->value.stringify();
-						break;
-					default:
-						plc.quoted = param->value.stringify();
-						if (!plc.quoted.is_empty() && connection->impl->supports_quote()) {
-							plc.quoted = connection->impl->quote(plc.quoted);
-							if (plc.quoted.is_empty()) {
-								return false;
+					switch (param->value.get_type()) {
+						case Variant::NIL:
+							plc.quoted = "NULL";
+							break;
+						case Variant::BOOL:
+							plc.quoted = param->value.booleanize() ? "1" : "0";
+							break;
+						case Variant::INT:
+						case Variant::FLOAT:
+							plc.quoted = param->value.stringify();
+							break;
+						default:
+							if (connection->driver->has_features(SQLDriver::FEAT_QUOTE)) {
+								plc.quoted = connection->impl->quote(param->value);
+								if (plc.quoted.is_empty()) {
+									return false;
+								}
+							} else {
+								plc.quoted = param->value.stringify();
 							}
-						}
-						break;
+							break;
+					}
 				}
 			}
 		} else if (query_type == SQLDriverStatement::PLACEHOLDER_POSITIONAL) {
@@ -869,33 +895,54 @@ bool SQLStatement::execute(const Variant &p_parameters) {
 				}
 			}
 		} else {
-			ERR_PRINT("Parameters must be either an Array or a Dictionary.");
+			ERR_FAIL_V_MSG(false, "Parameters must be either an Array or a Dictionary.");
 		}
 	}
 
-	for (auto &it : parameters) {
-		if (!impl->handle_parameter_event(SQLDriverStatement::PARAMETER_EVENT_PRE_EXEC, parameters_map, it.value)) {
+	return _execute();
+}
+
+bool SQLStatement::_execute() {
+	if (impl->get_placeholder_type() == SQLDriverStatement::PLACEHOLDER_NONE) {
+		if (!_parse_parameters()) {
 			return false;
 		}
+	} else {
+		for (auto &it : parameters) {
+			if (!impl->handle_parameter_event(SQLDriverStatement::PARAMETER_EVENT_PRE_EXEC, parameters_map, it.value)) {
+				return false;
+			}
+		}
 	}
 
+	ERR_FAIL_COND_V(active_query_string.is_empty(), false);
 	if (!impl->execute(active_query_string, parameters)) {
 		return false;
 	}
 
-	if (!executed) {
-		if (!impl->describe_columns()) {
-			return false;
-		}
-		executed = true;
+	if (executed) {
+		return true;
 	}
 
-	for (auto &it : parameters) {
-		if (!impl->handle_parameter_event(SQLDriverStatement::PARAMETER_EVENT_POST_EXEC, parameters_map, it.value)) {
-			return false;
-		}
+	if (!impl->describe_columns(columns)) {
+		return false;
+	}
+	switch (connection->columns_case_mode) {
+		case CASE_UPPER:
+			for (Column &column : columns) {
+				column.name = column.name.to_upper();
+			}
+			break;
+		case CASE_LOWER:
+			for (Column &column : columns) {
+				column.name = column.name.to_lower();
+			}
+			break;
+		default:
+			break;
 	}
 
+	executed = true;
 	return true;
 }
 
@@ -906,42 +953,43 @@ int64_t SQLStatement::get_row_count() const {
 
 int SQLStatement::get_column_count() const {
 	ERR_FAIL_NULL_V(impl, 0);
-	return impl->get_column_count();
+	return (int)columns.size();
 }
 
 String SQLStatement::get_column_name(int p_column) const {
 	ERR_FAIL_NULL_V(impl, String());
-	ERR_FAIL_INDEX_V(p_column, get_column_count(), String());
-	return impl->get_column_name(p_column);
+	ERR_FAIL_INDEX_V(p_column, (int)columns.size(), String());
+	return columns[p_column].name;
 }
 
 int SQLStatement::get_column_length(int p_column) const {
 	ERR_FAIL_NULL_V(impl, -1);
-	ERR_FAIL_INDEX_V(p_column, get_column_count(), -1);
-	return impl->get_column_length(p_column);
+	ERR_FAIL_INDEX_V(p_column, (int)columns.size(), -1);
+	return columns[p_column].length;
 }
 
 int SQLStatement::get_column_precision(int p_column) const {
 	ERR_FAIL_NULL_V(impl, 0);
-	ERR_FAIL_INDEX_V(p_column, get_column_count(), 0);
-	return impl->get_column_precision(p_column);
+	ERR_FAIL_INDEX_V(p_column, (int)columns.size(), 0);
+	return columns[p_column].precision;
 }
 
 Variant::Type SQLStatement::get_column_type(int p_column) const {
 	ERR_FAIL_NULL_V(impl, Variant::NIL);
-	ERR_FAIL_INDEX_V(p_column, get_column_count(), Variant::NIL);
-	return impl->get_column_type(p_column);
+	ERR_FAIL_INDEX_V(p_column, (int)columns.size(), Variant::NIL);
+	return columns[p_column].type;
 }
 
 Dictionary SQLStatement::get_column_meta(int p_column) const {
 	ERR_FAIL_NULL_V(impl, Dictionary());
-	ERR_FAIL_INDEX_V(p_column, get_column_count(), Dictionary());
+	ERR_FAIL_INDEX_V(p_column, (int)columns.size(), Dictionary());
 
 	Dictionary meta;
-	meta["name"] = impl->get_column_name(p_column);
-	meta["len"] = impl->get_column_length(p_column);
-	meta["precision"] = impl->get_column_precision(p_column);
-	meta["variant_type"] = impl->get_column_type(p_column);
+	const Column &column = columns[p_column];
+	meta["name"] = column.name;
+	meta["len"] = column.length;
+	meta["precision"] = column.precision;
+	meta["type"] = column.type;
 	if (!impl->get_column_meta(p_column, meta)) {
 		return Dictionary();
 	}
@@ -990,6 +1038,10 @@ void SQLStatement::_bind_methods() {
 	BIND_ENUM_CONSTANT(ATTR_EMULATE_PREPARES);
 	BIND_ENUM_CONSTANT(ATTR_DISABLE_PREPARES);
 	BIND_ENUM_CONSTANT(ATTR_CURSOR);
+	BIND_ENUM_CONSTANT(ATTR_FETCH_NULLS);
+	BIND_ENUM_CONSTANT(ATTR_COLUMNS_CASE);
+	BIND_ENUM_CONSTANT(ATTR_CONNECT_TIMEOUT);
+	BIND_ENUM_CONSTANT(ATTR_DRIVER_NAME);
 	BIND_ENUM_CONSTANT(ATTR_CLIENT_VERSION);
 	BIND_ENUM_CONSTANT(ATTR_SERVER_VERSION);
 	BIND_ENUM_CONSTANT(ATTR_CONNECTION_STATUS);
@@ -1023,6 +1075,14 @@ void SQLStatement::_bind_methods() {
 	BIND_ENUM_CONSTANT(FETCH_ORI_LAST);
 	BIND_ENUM_CONSTANT(FETCH_ORI_ABS);
 	BIND_ENUM_CONSTANT(FETCH_ORI_REL);
+
+	BIND_ENUM_CONSTANT(NULL_NATURAL);
+	BIND_ENUM_CONSTANT(NULL_EMPTY_STRING);
+	BIND_ENUM_CONSTANT(NULL_TO_STRING);
+
+	BIND_ENUM_CONSTANT(CASE_NATURAL);
+	BIND_ENUM_CONSTANT(CASE_LOWER);
+	BIND_ENUM_CONSTANT(CASE_UPPER);
 
 	ClassDB::bind_method(D_METHOD("bind_value", "param", "value"), &SQLStatement::bind_value);
 	ClassDB::bind_method(D_METHOD("execute", "parameters"), &SQLStatement::execute, DEFVAL(Variant()));
@@ -1060,14 +1120,16 @@ SQLConnection::SQLConnection() {
 
 SQLConnection::~SQLConnection() {
 	DEV_ASSERT(statement_count <= 0); // Should not happen due to reference counting
-
 	close();
 }
 
 bool SQLConnection::set_attribute(SQLStatement::Attribute p_attribute, const Variant &p_value) {
 	ERR_FAIL_NULL_V(impl, false);
 	error.clear();
+	return _set_attribute(p_attribute, p_value);
+}
 
+bool SQLConnection::_set_attribute(SQLStatement::Attribute p_attribute, const Variant &p_value) {
 	switch (p_attribute) {
 		case SQLStatement::ATTR_ERRMODE: {
 			ERR_FAIL_COND_V_MSG(!Variant::can_convert(p_value.get_type(), Variant::INT), false, "Error mode must be an integer.");
@@ -1099,6 +1161,20 @@ bool SQLConnection::set_attribute(SQLStatement::Attribute p_attribute, const Var
 			default_fetch_mode = fetch_mode;
 			return true;
 		}
+		case SQLStatement::ATTR_FETCH_NULLS: {
+			ERR_FAIL_COND_V_MSG(!Variant::can_convert(p_value.get_type(), Variant::INT), false, "Nulls mode must be an integer.");
+			const SQLStatement::NullMode mode = p_value;
+			ERR_FAIL_COND_V_MSG(mode < SQLStatement::NULL_NATURAL || mode >= SQLStatement::NULL_MAX, false, "Invalid nulls mode value.");
+			fetch_nulls_mode = mode;
+			return true;
+		}
+		case SQLStatement::ATTR_COLUMNS_CASE: {
+			ERR_FAIL_COND_V_MSG(!Variant::can_convert(p_value.get_type(), Variant::INT), false, "Columns case mode must be an integer.");
+			const SQLStatement::CaseMode mode = p_value;
+			ERR_FAIL_COND_V_MSG(mode < SQLStatement::CASE_NATURAL || mode >= SQLStatement::CASE_MAX, false, "Invalid columns case mode value.");
+			columns_case_mode = mode;
+			return true;
+		}
 		default:
 			return impl->set_attribute(p_attribute, p_value);
 	}
@@ -1113,22 +1189,42 @@ Variant SQLConnection::get_attribute(SQLStatement::Attribute p_attribute) {
 			return error_mode;
 		case SQLStatement::ATTR_DEFAULT_FETCH_MODE:
 			return default_fetch_mode;
+		case SQLStatement::ATTR_DRIVER_NAME:
+			return driver->get_name();
+		case SQLStatement::ATTR_FETCH_NULLS:
+			return fetch_nulls_mode;
+		case SQLStatement::ATTR_COLUMNS_CASE:
+			return columns_case_mode;
 		default:
 			return impl->get_attribute(p_attribute);
 	}
 }
 
-Error SQLConnection::open(const String &p_connection_string) {
+Error SQLConnection::open(const String &p_data_source_name, const String &p_username, const String &p_password, const Dictionary &p_options) {
 	ERR_FAIL_COND_V_MSG(statement_count > 0, ERR_BUSY, "Cannot open a SQL connection while there are open statements referencing it.");
 
 	close();
 	error.clear();
 
-	const int colon_pos(p_connection_string.find_char(':'));
+	HashMap<SQLStatement::Attribute, Variant> options;
+	for (const KeyValue<Variant, Variant> &it : p_options) {
+		ERR_FAIL_COND_V_MSG(!Variant::can_convert(it.key.get_type(), Variant::INT), ERR_INVALID_PARAMETER, "Attribute key must be an integer.");
+		options.insert(it.key, it.value);
+	}
+
+	if (options.has(SQLStatement::ATTR_ERRMODE)) {
+		ERR_FAIL_COND_V(!_set_attribute(SQLStatement::ATTR_ERRMODE, options[SQLStatement::ATTR_ERRMODE]), ERR_INVALID_PARAMETER);
+	} else {
+		error_mode = SQLStatement::ERRMODE_ERROR;
+	}
+
+	// TODO: Allow registering data sources in project settings and p_data_source_name is just the alias
+
+	const int colon_pos(p_data_source_name.find_char(':'));
 	ERR_FAIL_COND_V_MSG(colon_pos == -1, ERR_INVALID_PARAMETER, "SQL driver name is missing from the connection string.");
 
-	const String driver_name(p_connection_string.substr(0, colon_pos));
-	const String driver_connection_string(p_connection_string.substr(colon_pos + 1));
+	const String driver_name(p_data_source_name.substr(0, colon_pos));
+	const String data_source_name(p_data_source_name.substr(colon_pos + 1));
 
 	driver = SQLDriver::get_driver_by_name(driver_name);
 	ERR_FAIL_COND_V_MSG(driver.is_null(), ERR_UNAVAILABLE, vformat("SQL driver '%s' not found.", driver_name));
@@ -1138,16 +1234,20 @@ Error SQLConnection::open(const String &p_connection_string) {
 		close();
 		return FAILED;
 	}
-
 	impl->connection = this;
 
-	const Error err(impl->open(driver_connection_string));
+	const Error err(impl->open(data_source_name, p_username, p_password, options));
 	if (err != OK) {
 		close();
 		return err;
 	}
 
-	connection_string = p_connection_string;
+	for (const auto &it : options) {
+		if (it.key != SQLStatement::ATTR_ERRMODE && !_set_attribute(it.key, it.value)) {
+			close();
+			return ERR_INVALID_PARAMETER;
+		}
+	}
 	return OK;
 }
 
@@ -1160,23 +1260,37 @@ void SQLConnection::close() {
 	}
 
 	driver.unref();
+	statement_count = 0;
 	is_in_transaction = false;
-	connection_string.clear();
+	// Don't clear error so users can check why the connection failed
 }
 
 bool SQLConnection::is_open() const {
 	return impl != nullptr;
 }
 
-String SQLConnection::get_connection_string() const {
-	return connection_string;
-}
+Ref<SQLStatement> SQLConnection::_prepare(const String &p_query, const HashMap<SQLStatement::Attribute, Variant> &p_options) {
+	ERR_FAIL_COND_V_MSG(p_query.is_empty(), Ref<SQLStatement>(), "Query string cannot be empty.");
 
-int64_t SQLConnection::exec(const String &p_statement) {
-	ERR_FAIL_NULL_V(impl, -1);
-	error.clear();
+	SQLDriverStatement *const stmt_impl(impl->create_statement());
+	if (!stmt_impl) {
+		return Ref<SQLStatement>();
+	}
 
-	return impl->exec(p_statement);
+	Ref<SQLStatement> stmt;
+	stmt.instantiate();
+	++statement_count;
+	stmt->connection = this;
+	stmt->impl = stmt_impl;
+	stmt->query_string = p_query;
+	stmt_impl->statement = stmt.ptr();
+
+	if (!stmt->impl->prepare(p_options) || !stmt->_parse_parameters()) {
+		error = stmt->error;
+		return Ref<SQLStatement>();
+	}
+
+	return stmt;
 }
 
 Ref<SQLStatement> SQLConnection::query(const String &p_query, int p_fetch_mode, const Variant &p_fetch_param) {
@@ -1187,72 +1301,52 @@ Ref<SQLStatement> SQLConnection::query(const String &p_query, int p_fetch_mode, 
 		return Ref<SQLStatement>();
 	}
 
-	SQLDriverStatement *const stmt_impl(impl->create_statement());
-	if (!stmt_impl) {
+	Ref<SQLStatement> stmt = _prepare(p_query, {});
+	if (stmt.is_null()) {
 		return Ref<SQLStatement>();
 	}
 
-	Ref<SQLStatement> stmt;
-	stmt.instantiate();
-	++statement_count;
-	stmt->connection = this;
-	stmt->impl = stmt_impl;
-	stmt->query_string = p_query;
+	if (!stmt->_execute()) {
+		error = stmt->error;
+		return Ref<SQLStatement>();
+	}
+
 	stmt->fetch_mode = p_fetch_mode;
 	stmt->fetch_param = p_fetch_param;
-	stmt_impl->statement = stmt.ptr();
-
-	if (!stmt_impl->prepare({}) || !stmt->_parse_parameters()) {
-		error = stmt->error;
-		return Ref<SQLStatement>();
-	}
-
-	if (!stmt_impl->execute(stmt->active_query_string, stmt->parameters) || !stmt_impl->describe_columns()) {
-		error = stmt->error;
-		return Ref<SQLStatement>();
-	}
-
-	stmt->executed = true;
 	return stmt;
 }
 
-Ref<SQLStatement> SQLConnection::prepare(const String &p_query, const Dictionary &p_attributes) {
+Ref<SQLStatement> SQLConnection::prepare(const String &p_query, const Dictionary &p_options) {
 	ERR_FAIL_NULL_V(impl, Ref<SQLStatement>());
 	error.clear();
 
-	SQLDriverStatement *const stmt_impl(impl->create_statement());
-	if (!stmt_impl) {
-		return Ref<SQLStatement>();
+	HashMap<SQLStatement::Attribute, Variant> options;
+	for (const KeyValue<Variant, Variant> &it : p_options) {
+		ERR_FAIL_COND_V_MSG(!Variant::can_convert(it.key.get_type(), Variant::INT), Ref<SQLStatement>(), "Attribute key must be an integer.");
+		options.insert(it.key, it.value);
 	}
 
-	Ref<SQLStatement> stmt;
-	stmt.instantiate();
-	++statement_count;
-	stmt->connection = this;
-	stmt->impl = stmt_impl;
-	stmt->query_string = p_query;
-	stmt_impl->statement = stmt.ptr();
+	return _prepare(p_query, options);
+}
 
-	HashMap<SQLStatement::Attribute, Variant> attributes;
-	for (const KeyValue<Variant, Variant> &attribute : p_attributes) {
-		if (!attribute.key.is_num()) {
-			_push_error(SQL_ERROR(String(), String(), "Attribute keys must be numeric."));
-			return Ref<SQLStatement>();
-		}
-		attributes.insert(attribute.key, attribute.value);
-	}
+int64_t SQLConnection::exec(const String &p_statement) {
+	ERR_FAIL_NULL_V(impl, -1);
+	error.clear();
 
-	if (!stmt_impl->prepare(attributes) || !stmt->_parse_parameters()) {
-		error = stmt->error;
-		return Ref<SQLStatement>();
-	}
+	ERR_FAIL_COND_V_MSG(p_statement.is_empty(), -1, "Cannot execute an empty statement.");
 
-	return stmt;
+	return impl->exec(p_statement);
 }
 
 bool SQLConnection::begin_transaction() {
 	ERR_FAIL_NULL_V(impl, false);
+
 	ERR_FAIL_COND_V_MSG(in_transaction(), false, "Cannot begin a new transaction when already in a transaction.");
+	if (!driver->has_features(SQLDriver::FEAT_TRANSACTIONS)) {
+		_push_error(SQL_ERROR(SQL_CODE_UNSUPPORTED, String(), String("Driver does not support transactions.")));
+		return false;
+	}
+
 	if (impl->begin_transaction()) {
 		is_in_transaction = true;
 		return true;
@@ -1262,7 +1356,9 @@ bool SQLConnection::begin_transaction() {
 
 bool SQLConnection::commit() {
 	ERR_FAIL_NULL_V(impl, false);
+
 	ERR_FAIL_COND_V_MSG(!in_transaction(), false, "Cannot commit when not in a transaction.");
+
 	if (impl->commit()) {
 		is_in_transaction = false;
 		return true;
@@ -1272,7 +1368,9 @@ bool SQLConnection::commit() {
 
 bool SQLConnection::rollback() {
 	ERR_FAIL_NULL_V(impl, false);
+
 	ERR_FAIL_COND_V_MSG(!in_transaction(), false, "Cannot rollback when not in a transaction.");
+
 	if (impl->rollback()) {
 		is_in_transaction = false;
 		return true;
@@ -1282,7 +1380,8 @@ bool SQLConnection::rollback() {
 
 bool SQLConnection::in_transaction() const {
 	ERR_FAIL_NULL_V(impl, false);
-	if (impl->supports_in_transaction()) {
+
+	if (driver->has_features(SQLDriver::FEAT_IN_TRANSACTION)) {
 		return impl->in_transaction();
 	}
 	return is_in_transaction;
@@ -1291,13 +1390,25 @@ bool SQLConnection::in_transaction() const {
 Variant SQLConnection::get_last_insert_id(const String &p_name) {
 	ERR_FAIL_NULL_V(impl, Variant());
 	error.clear();
+
+	if (!driver->has_features(SQLDriver::FEAT_LAST_INSERT_ID)) {
+		_push_error(SQL_ERROR(SQL_CODE_UNSUPPORTED, String(), String("Driver does not support retrieving last insert ID.")));
+		return Variant();
+	}
+
 	return impl->get_last_insert_id(p_name);
 }
 
-String SQLConnection::quote(const String &p_string) {
+String SQLConnection::quote(const Variant &p_value) {
 	ERR_FAIL_NULL_V(impl, String());
 	error.clear();
-	return impl->quote(p_string);
+
+	if (!driver->has_features(SQLDriver::FEAT_QUOTE)) {
+		_push_error(SQL_ERROR(SQL_CODE_UNSUPPORTED, String(), String("Driver does not support quoting.")));
+		return String();
+	}
+
+	return impl->quote(p_value);
 }
 
 String SQLConnection::get_error_code() const {
@@ -1326,18 +1437,11 @@ void SQLConnection::_handle_error(const SQLError &p_error) const {
 	_err_print_error(p_error.function ? p_error.function : "", p_error.file ? p_error.file : "", p_error.line, message, false, type);
 }
 
-Ref<SQLConnection> SQLConnection::open_connection(const String &p_connection_string, const Dictionary &p_attributes) {
+Ref<SQLConnection> SQLConnection::open_connection(const String &p_data_source_name, const String &p_username,
+		const String &p_password, const Dictionary &p_options) {
 	Ref<SQLConnection> connection;
 	connection.instantiate();
-
-	for (const KeyValue<Variant, Variant> &attribute : p_attributes) {
-		ERR_FAIL_COND_V_MSG(!Variant::can_convert(attribute.key.get_type(), Variant::INT), Ref<SQLConnection>(), "Attribute key must be an integer.");
-		if (!connection->set_attribute(attribute.key, attribute.value)) {
-			return Ref<SQLConnection>();
-		}
-	}
-
-	if (connection->open(p_connection_string) != OK) {
+	if (connection->open(p_data_source_name, p_username, p_password, p_options) != OK) {
 		return Ref<SQLConnection>();
 	}
 	return connection;
@@ -1348,26 +1452,29 @@ PackedStringArray SQLConnection::get_available_drivers() {
 }
 
 void SQLConnection::_bind_methods() {
-	ClassDB::bind_method(D_METHOD("open", "connection_string"), &SQLConnection::open);
+	BIND_CONSTANT(DEFAULT_CONNECT_TIMEOUT);
+
+	ClassDB::bind_method(D_METHOD("open", "data_source_name", "username", "password", "options"),
+			&SQLConnection::open, DEFVAL(String()), DEFVAL(String()), DEFVAL(Dictionary()));
 	ClassDB::bind_method(D_METHOD("close"), &SQLConnection::close);
 	ClassDB::bind_method(D_METHOD("exec", "statement"), &SQLConnection::exec);
 	ClassDB::bind_method(D_METHOD("query", "query", "fetch_mode", "fetch_param"), &SQLConnection::query, DEFVAL(SQLStatement::FETCH_DEFAULT), DEFVAL(Variant()));
-	ClassDB::bind_method(D_METHOD("prepare", "query", "attributes"), &SQLConnection::prepare, DEFVAL(Dictionary()));
+	ClassDB::bind_method(D_METHOD("prepare", "query", "options"), &SQLConnection::prepare, DEFVAL(Dictionary()));
 	ClassDB::bind_method(D_METHOD("begin_transaction"), &SQLConnection::begin_transaction);
 	ClassDB::bind_method(D_METHOD("commit"), &SQLConnection::commit);
 	ClassDB::bind_method(D_METHOD("rollback"), &SQLConnection::rollback);
 	ClassDB::bind_method(D_METHOD("get_last_insert_id", "name"), &SQLConnection::get_last_insert_id, DEFVAL(String()));
-	ClassDB::bind_method(D_METHOD("quote", "string"), &SQLConnection::quote);
+	ClassDB::bind_method(D_METHOD("quote", "value"), &SQLConnection::quote);
 	ClassDB::bind_method(D_METHOD("set_attribute", "attribute", "value"), &SQLConnection::set_attribute);
-	ClassDB::bind_method(D_METHOD("get_attribute", "attributes"), &SQLConnection::get_attribute);
+	ClassDB::bind_method(D_METHOD("get_attribute", "attribute"), &SQLConnection::get_attribute);
 
 	ClassDB::bind_method(D_METHOD("is_open"), &SQLConnection::is_open);
-	ClassDB::bind_method(D_METHOD("get_connection_string"), &SQLConnection::get_connection_string);
 	ClassDB::bind_method(D_METHOD("in_transaction"), &SQLConnection::in_transaction);
 	ClassDB::bind_method(D_METHOD("get_error_code"), &SQLConnection::get_error_code);
 	ClassDB::bind_method(D_METHOD("get_error_info"), &SQLConnection::get_error_info);
 
-	ClassDB::bind_static_method("SQLConnection", D_METHOD("open_connection", "connection_string", "attributes"), &SQLConnection::open_connection, DEFVAL(Dictionary()));
+	ClassDB::bind_static_method("SQLConnection", D_METHOD("open_connection", "data_source_name", "username", "password", "options"),
+			&SQLConnection::open_connection, DEFVAL(String()), DEFVAL(String()), DEFVAL(Dictionary()));
 	ClassDB::bind_static_method("SQLConnection", D_METHOD("get_available_drivers"), &SQLConnection::get_available_drivers);
 }
 
@@ -1381,23 +1488,7 @@ SQLDriverStatement::SQLDriverStatement() {
 SQLDriverStatement::~SQLDriverStatement() {
 }
 
-int SQLDriverStatement::get_column_length(int p_column) const {
-	return -1;
-}
-
-int SQLDriverStatement::get_column_precision(int p_column) const {
-	return 0;
-}
-
-Variant::Type SQLDriverStatement::get_column_type(int p_column) const {
-	return Variant::STRING;
-}
-
 bool SQLDriverStatement::get_column_meta(int p_column, Dictionary &r_meta) const {
-	return true;
-}
-
-bool SQLDriverStatement::describe_columns() {
 	return true;
 }
 
@@ -1419,7 +1510,7 @@ int64_t SQLDriverStatement::get_row_count() const {
 	return 0;
 }
 
-SQLDriverStatement::PlaceholderType SQLDriverStatement::get_placeholder_support() const {
+SQLDriverStatement::PlaceholderType SQLDriverStatement::get_placeholder_type() const {
 	return PLACEHOLDER_NONE;
 }
 
@@ -1431,19 +1522,11 @@ bool SQLDriverStatement::close_cursor() {
 	return true;
 }
 
-bool SQLDriverStatement::supports_close_cursor() const {
-	return false;
-}
-
 bool SQLDriverStatement::do_next_rowset() {
 	return true;
 }
 
-bool SQLDriverStatement::supports_next_rowset() const {
-	return false;
-}
-
-bool SQLDriverStatement::prepare(const HashMap<SQLStatement::Attribute, Variant> &p_attributes) {
+bool SQLDriverStatement::prepare(const HashMap<SQLStatement::Attribute, Variant> &p_options) {
 	return true;
 }
 
@@ -1581,17 +1664,16 @@ SQLDriverConnection::~SQLDriverConnection() {
 }
 
 bool SQLDriverConnection::set_attribute(SQLStatement::Attribute p_attribute, const Variant &p_value) {
-	push_error(SQL_ERROR(SQL_CODE_UNSUPPORTED, String(), "Driver does not support setting attributes"));
+	push_error(SQL_ERROR(SQL_CODE_UNSUPPORTED, String(), vformat("Attribute %d is not supported by this driver.", p_attribute)));
 	return false;
 }
 
 Variant SQLDriverConnection::get_attribute(SQLStatement::Attribute p_attribute) {
-	push_error(SQL_ERROR(SQL_CODE_UNSUPPORTED, String(), "Driver does not support getting attributes"));
+	push_error(SQL_ERROR(SQL_CODE_UNSUPPORTED, String(), vformat("Attribute %d is not supported by this driver.", p_attribute)));
 	return Variant();
 }
 
 bool SQLDriverConnection::begin_transaction() {
-	push_error(SQL_ERROR(SQL_CODE_UNSUPPORTED, String(), String("Driver does not support transactions.")));
 	return false;
 }
 
@@ -1607,22 +1689,12 @@ bool SQLDriverConnection::in_transaction() const {
 	return false;
 }
 
-bool SQLDriverConnection::supports_in_transaction() const {
-	return false;
-}
-
 Variant SQLDriverConnection::get_last_insert_id(const String &p_name) {
-	push_error(SQL_ERROR(SQL_CODE_UNSUPPORTED, String(), String("Driver does not support retrieving last insert ID.")));
 	return Variant();
 }
 
-String SQLDriverConnection::quote(const String &p_string) {
-	push_error(SQL_ERROR(SQL_CODE_UNSUPPORTED, String(), String("Driver does not support quoting.")));
+String SQLDriverConnection::quote(const Variant &p_value) {
 	return String();
-}
-
-bool SQLDriverConnection::supports_quote() const {
-	return false;
 }
 
 void SQLDriverConnection::push_error(const SQLError &p_error) {

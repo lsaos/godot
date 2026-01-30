@@ -28,6 +28,15 @@
 /* SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.                 */
 /**************************************************************************/
 
+/**************************************************************************/
+/*  Portions of this file are derived from PDO (PHP Data Objects)         */
+/*  https://www.php.net/manual/en/book.pdo.php                            */
+/*                                                                        */
+/*  The following code is copyright (c) The PHP Group                     */
+/*  and is licensed under the PHP License, version 3.01:                  */
+/*  https://www.php.net/license/3_01.txt                                  */
+/**************************************************************************/
+
 #pragma once
 
 #include "core/io/sql_connection.h"
@@ -39,38 +48,25 @@ class PostgreSQLStatement : public SQLDriverStatement {
 public:
 	PostgreSQLStatement(PostgreSQLConnection &p_con);
 	~PostgreSQLStatement() override;
-
 	bool execute(const String &p_statement, const HashMap<Variant, SQLStatement::Parameter> &p_parameters) override;
 	bool fetch(SQLStatement::FetchOrientation p_orientation, int64_t p_offset) override;
-	bool get_column_value(int p_column, Variant &o_value) override;
-	bool describe_columns() override;
+	bool get_value(int p_column, Variant &o_value) override;
+	bool describe_columns(LocalVector<SQLStatement::Column> &o_columns) override;
 	bool handle_parameter_event(ParameterEvent p_event, const HashMap<Variant, String> &p_parameters_map, SQLStatement::Parameter &r_parameter) override;
-	bool prepare(const HashMap<SQLStatement::Attribute, Variant> &p_attributes) override;
-
+	bool prepare(const HashMap<SQLStatement::Attribute, Variant> &p_options) override;
 	int64_t get_row_count() const override;
-	int get_column_count() const override;
-	String get_column_name(int p_column) const override;
-	int get_column_length(int p_column) const override;
-	int get_column_precision(int p_column) const override;
-	Variant::Type get_column_type(int p_column) const override;
 	bool get_column_meta(int p_column, Dictionary &r_meta) const override;
 	Variant get_attribute(SQLStatement::Attribute p_attribute) override;
 	TokenType parse_query_token(const char32_t *&r_cur) const override;
-	PlaceholderType get_placeholder_support() const override;
+	PlaceholderType get_placeholder_type() const override;
 	String get_named_rewrite_template() const override;
-	bool supports_close_cursor() const override;
 
 private:
-	struct Column {
-		String name;
-		Oid type = 0;
-		int length = 0;
-		int precision = 0;
-	};
-	LocalVector<Column> columns;
+	LocalVector<Oid> column_types;
 	LocalVector<PackedByteArray> parameter_values;
 	LocalVector<const char *> parameter_pointers;
 	LocalVector<int> parameter_lengths;
+	LocalVector<int> parameter_formats;
 	CharString name;
 	String cursor_name;
 	PostgreSQLConnection &con;
@@ -85,26 +81,23 @@ class PostgreSQLConnection : public SQLDriverConnection {
 public:
 	PostgreSQLConnection();
 	~PostgreSQLConnection() override;
-
 	bool set_attribute(SQLStatement::Attribute p_attribute, const Variant &p_value) override;
 	Variant get_attribute(SQLStatement::Attribute p_attribute) override;
-	Error open(const String &p_connection_string) override;
+	Error open(const String &p_data_source_name, const String &p_username, const String &p_password,
+			const HashMap<SQLStatement::Attribute, Variant> &p_options) override;
 	int64_t exec(const String &p_statement) override;
 	bool begin_transaction() override;
 	bool commit() override;
 	bool rollback() override;
 	Variant get_last_insert_id(const String &p_name) override;
-	String quote(const String &p_string) override;
+	String quote(const Variant &p_value) override;
 	PostgreSQLStatement *create_statement() override;
-
 	bool in_transaction() const override;
-	bool supports_in_transaction() const override;
-	bool supports_quote() const override;
 
-	PGconn *get_conn() const { return conn; }
-	bool has_emulate_prepares() const { return emulate_prepares; }
-	bool has_disable_prepares() const { return disable_prepares; }
-	int increment_statement_counter() { return ++statement_counter; }
+	_FORCE_INLINE_ PGconn *get_conn() const { return conn; }
+	_FORCE_INLINE_ bool has_emulate_prepares() const { return emulate_prepares; }
+	_FORCE_INLINE_ bool has_disable_prepares() const { return disable_prepares; }
+	_FORCE_INLINE_ int increment_statement_counter() { return ++statement_counter; }
 
 private:
 	bool _exec_command(const String &p_statement);
@@ -122,7 +115,6 @@ class PostgreSQLDriver : public SQLDriver {
 public:
 	PostgreSQLDriver();
 	~PostgreSQLDriver() override;
-
 	String get_name() const override;
 	SQLDriverConnection *create_connection() override;
 };
