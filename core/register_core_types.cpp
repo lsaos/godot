@@ -59,6 +59,7 @@
 #include "core/io/resource_format_binary.h"
 #include "core/io/resource_importer.h"
 #include "core/io/resource_uid.h"
+#include "core/io/sql_connection.h"
 #include "core/io/stream_peer_gzip.h"
 #include "core/io/stream_peer_tls.h"
 #include "core/io/tcp_server.h"
@@ -270,6 +271,9 @@ void register_core_types() {
 	GDREGISTER_CLASS(ConfigFile);
 
 	GDREGISTER_CLASS(PCKPacker);
+
+	GDREGISTER_CLASS(SQLStatement);
+	GDREGISTER_CLASS(SQLConnection);
 
 	GDREGISTER_CLASS(AStar3D);
 	GDREGISTER_CLASS(AStar2D);
