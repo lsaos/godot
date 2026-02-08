@@ -83,7 +83,7 @@ public:
 	~PostgreSQLConnection() override;
 	bool set_attribute(SQLStatement::Attribute p_attribute, const Variant &p_value) override;
 	Variant get_attribute(SQLStatement::Attribute p_attribute) override;
-	Error open(const String &p_data_source_name, const String &p_username, const String &p_password,
+	Error open(const String &p_dsn, const String &p_username, const String &p_password,
 			const HashMap<SQLStatement::Attribute, Variant> &p_options) override;
 	int64_t exec(const String &p_statement) override;
 	bool begin_transaction() override;

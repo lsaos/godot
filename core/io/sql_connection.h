@@ -266,7 +266,7 @@ public:
 	SQLConnection();
 	~SQLConnection() override;
 
-	Error open(const String &p_data_source_name, const String &p_username = String(),
+	Error open(const String &p_dsn, const String &p_username = String(),
 			const String &p_password = String(), const Dictionary &p_options = Dictionary());
 	void close();
 	int64_t exec(const String &p_statement);
@@ -285,7 +285,7 @@ public:
 	String get_error_code() const;
 	Array get_error_info() const;
 
-	static Ref<SQLConnection> open_connection(const String &p_data_source_name, const String &p_username = String(),
+	static Ref<SQLConnection> open_connection(const String &p_dsn, const String &p_username = String(),
 			const String &p_password = String(), const Dictionary &p_options = Dictionary());
 	static PackedStringArray get_available_drivers();
 
@@ -365,7 +365,7 @@ private:
 class SQLDriverConnection {
 public:
 	virtual ~SQLDriverConnection();
-	virtual Error open(const String &p_data_source_name, const String &p_username, const String &p_password,
+	virtual Error open(const String &p_dsn, const String &p_username, const String &p_password,
 			const HashMap<SQLStatement::Attribute, Variant> &p_options) = 0;
 	virtual int64_t exec(const String &p_statement) = 0;
 	virtual SQLDriverStatement *create_statement() = 0;

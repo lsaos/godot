@@ -794,7 +794,7 @@ static String _escape_credentials(const String &p_credential) {
 	return p_credential.replace("\\", "\\\\").replace("'", "\\'");
 }
 
-Error PostgreSQLConnection::open(const String &p_data_source_name, const String &p_username, const String &p_password,
+Error PostgreSQLConnection::open(const String &p_dsn, const String &p_username, const String &p_password,
 		const HashMap<SQLStatement::Attribute, Variant> &p_options) {
 	const Error library_error(load_libpq_functions());
 	if (library_error != OK) {
@@ -809,14 +809,14 @@ Error PostgreSQLConnection::open(const String &p_data_source_name, const String 
 		ERR_FAIL_COND_V(connect_timeout < 0, ERR_INVALID_PARAMETER);
 	}
 
-	String connection_string = p_data_source_name.replace_char(';', ' ');
-	if (!p_data_source_name.contains("connect_timeout=")) {
+	String connection_string = p_dsn.replace_char(';', ' ');
+	if (!p_dsn.contains("connect_timeout=")) {
 		connection_string += vformat(" connect_timeout=%d", connect_timeout);
 	}
-	if (!p_username.is_empty() && !p_data_source_name.contains("user=")) {
+	if (!p_username.is_empty() && !p_dsn.contains("user=")) {
 		connection_string += vformat(" user='%s'", _escape_credentials(p_username));
 	}
-	if (!p_password.is_empty() && !p_data_source_name.contains("password=")) {
+	if (!p_password.is_empty() && !p_dsn.contains("password=")) {
 		connection_string += vformat(" password='%s'", _escape_credentials(p_password));
 	}
 
